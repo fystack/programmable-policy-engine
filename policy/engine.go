@@ -107,11 +107,13 @@ func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 		return decision
 	}
 
-	var allowDecision *Decision
-	var firstErr error
+	var allowDecision Decision
+	var hasAllowDecision bool
 	evaluated := 0
 
-	for _, policy := range e.policies {
+	policyErrors := make([][]error, len(e.policies))
+
+	for idx, policy := range e.policies {
 		policyMatched := false
 
 		for _, rule := range policy.rules {
@@ -119,9 +121,7 @@ func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 
 			ok, err := rule.evaluate(input)
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
+				policyErrors[idx] = append(policyErrors[idx], err)
 				continue
 			}
 
@@ -136,53 +136,51 @@ func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 				Message:   rule.rule.Description,
 				Matched:   true,
 				Evaluated: evaluated,
+				Error:     joinErrors(policyErrors[idx]),
 			}
+			matchDecision.ErrorMessage = cleanErrorMessage(matchDecision.Error)
 
 			if rule.rule.Effect == EffectDeny {
-				matchDecision.Error = firstErr
-				matchDecision.ErrorMessage = cleanErrorMessage(firstErr)
 				return matchDecision
 			}
 
 			policyMatched = true
 
-			if allowDecision == nil {
-				cp := matchDecision
-				allowDecision = &cp
+			if !hasAllowDecision {
+				allowDecision = matchDecision
+				hasAllowDecision = true
 			}
 		}
 
 		if !policyMatched && policy.hasLocalDefault {
 			defaultDecision := Decision{
-				Effect:       policy.defaultEffect,
-				Policy:       policy.policy.Name,
-				Message:      "policy default effect applied",
-				Matched:      true,
-				Evaluated:    evaluated,
-				Error:        firstErr,
-				ErrorMessage: cleanErrorMessage(firstErr),
+				Effect:    policy.defaultEffect,
+				Policy:    policy.policy.Name,
+				Message:   "policy default effect applied",
+				Matched:   true,
+				Evaluated: evaluated,
+				Error:     joinErrors(policyErrors[idx]),
 			}
+			defaultDecision.ErrorMessage = cleanErrorMessage(defaultDecision.Error)
 
 			if policy.defaultEffect == EffectDeny {
 				return defaultDecision
 			}
 
-			if allowDecision == nil {
-				cp := defaultDecision
-				allowDecision = &cp
+			if !hasAllowDecision {
+				allowDecision = defaultDecision
+				hasAllowDecision = true
 			}
 		}
 	}
 
-	if allowDecision != nil {
-		allowDecision.Error = firstErr
-		allowDecision.ErrorMessage = cleanErrorMessage(firstErr)
-		return *allowDecision
+	if hasAllowDecision {
+		return allowDecision
 	}
 
 	decision.Evaluated = evaluated
-	decision.Error = firstErr
-	decision.ErrorMessage = cleanErrorMessage(firstErr)
+	decision.Error = joinErrors(flattenErrors(policyErrors))
+	decision.ErrorMessage = cleanErrorMessage(decision.Error)
 	return decision
 }
 
@@ -219,6 +217,21 @@ func compilePolicy(p Policy, cfg engineConfig) (*compiledPolicy, error) {
 		return nil, fmt.Errorf("policy %q must include at least one rule or specify a default effect", p.Name)
 	}
 
+	baseOptions := make([]expr.Option, 0, len(cfg.exprOptions)+3)
+	baseOptions = append(baseOptions, cfg.exprOptions...)
+
+	// Only allow undefined variables if strict types are disabled
+	if !cfg.strictTypes {
+		baseOptions = append(baseOptions, expr.AllowUndefinedVariables())
+	}
+
+	if cfg.env != nil {
+		baseOptions = append(baseOptions, expr.Env(cfg.env))
+	} else {
+		baseOptions = append(baseOptions, expr.Env(map[string]any{}))
+	}
+	baseOptions = append(baseOptions, expr.AsBool())
+
 	rules := make([]*compiledRule, 0, len(p.Rules))
 
 	for idx := range p.Rules {
@@ -238,22 +251,7 @@ func compilePolicy(p Policy, cfg engineConfig) (*compiledPolicy, error) {
 			return nil, fmt.Errorf("rule %q condition cannot be empty", rule.ID)
 		}
 
-		opts := make([]expr.Option, 0, len(cfg.exprOptions)+3)
-		opts = append(opts, cfg.exprOptions...)
-
-		// Only allow undefined variables if strict types are disabled
-		if !cfg.strictTypes {
-			opts = append(opts, expr.AllowUndefinedVariables())
-		}
-
-		if cfg.env != nil {
-			opts = append(opts, expr.Env(cfg.env))
-		} else {
-			opts = append(opts, expr.Env(map[string]any{}))
-		}
-		opts = append(opts, expr.AsBool())
-
-		program, err := expr.Compile(rule.Condition, opts...)
+		program, err := expr.Compile(rule.Condition, baseOptions...)
 		if err != nil {
 			return nil, fmt.Errorf("compile rule %q: %w", rule.ID, err)
 		}
@@ -301,8 +299,7 @@ func cleanErrorMessage(err error) string {
 	var cleanLines []string
 	for _, line := range lines {
 		// Skip lines that are just formatting (contain only spaces, dots, |, ^)
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "|") || strings.HasPrefix(trimmed, ".") {
+		if strings.Trim(line, " \t.|^") == "" {
 			continue
 		}
 		cleanLines = append(cleanLines, line)
@@ -313,4 +310,26 @@ func cleanErrorMessage(err error) string {
 	}
 
 	return errStr
+}
+
+func joinErrors(errs []error) error {
+	switch len(errs) {
+	case 0:
+		return nil
+	case 1:
+		return errs[0]
+	default:
+		return errors.Join(errs...)
+	}
+}
+
+func flattenErrors(errCollections [][]error) []error {
+	var combined []error
+	for _, errs := range errCollections {
+		if len(errs) == 0 {
+			continue
+		}
+		combined = append(combined, errs...)
+	}
+	return combined
 }

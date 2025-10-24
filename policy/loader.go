@@ -10,7 +10,9 @@ import (
 // ParseJSONDocument decodes a policy document from JSON.
 func ParseJSONDocument(r io.Reader) (Document, error) {
 	var doc Document
-	if err := json.NewDecoder(r).Decode(&doc); err != nil {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&doc); err != nil {
 		return Document{}, fmt.Errorf("decode policy document: %w", err)
 	}
 	return doc, nil
