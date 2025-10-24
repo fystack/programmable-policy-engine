@@ -1,0 +1,24 @@
+{
+  "version": "2024-10-24",
+  "default_effect": "DENY",
+  "policies": [
+    {
+      "name": "withdrawal-override",
+      "description": "Control withdrawals based on transaction attributes and user role",
+      "rules": [
+        {
+          "id": "deny_exceed_amount",
+          "description": "Exceed allowed amount",
+          "effect": "DENY",
+          "condition": "transaction.amount_numeric > 99.9"
+        },
+        {
+          "id": "allow_small_admin_owner",
+          "description": "Allow admins or owners to move less than or equal to 100 units",
+          "effect": "ALLOW",
+          "condition": "transaction.amount_numeric <= 100 && transaction.user.role in ['admin', 'owner']"
+        }
+      ]
+    }
+  ]
+}
