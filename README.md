@@ -2,6 +2,39 @@
 
 This repository provides a programmable policy engine that helps wallets and treasury platforms evaluate high-volume transactions against configurable guardrails. Policies are defined as JSON documents and executed with the [expr](https://github.com/expr-lang/expr) expression language so teams can ship granular business logic without redeploying code.
 
+```json
+{
+  "version": "2024-10-24",
+  "default_effect": "DENY",
+  "policies": [
+    {
+      "name": "withdrawal-override",
+      "description": "Control withdrawals based on transaction attributes and user role",
+      "rules": [
+        {
+          "id": "deny_exceed_amount",
+          "description": "Exceed allowed amount",
+          "effect": "DENY",
+          "condition": "transaction.amount_numeric > 99.9"
+        },
+        {
+          "id": "deny_untrusted_role",
+          "description": "Deny withdrawals when the requester is not a trusted role",
+          "effect": "DENY",
+          "condition": "transaction.user.role == nil || transaction.user.role == '' || transaction.user.role not in ['admin', 'owner']"
+        },
+        {
+          "id": "allow_trusted_role_withdrawal",
+          "description": "Allow admins or owners to initiate outbound withdrawals",
+          "effect": "ALLOW",
+          "condition": "transaction.user.role in ['admin', 'owner'] && transaction.direction == 'out'"
+        }
+      ]
+    }
+  ]
+}
+```
+
 Key use cases include:
 - Enforcing transaction thresholds (e.g., stop withdrawals above a limit)
 - Requiring additional reviews based on user role, network, or asset metadata
@@ -36,6 +69,7 @@ import (
 
 type TransactionContext struct {
 	Amount float64
+	Direction string
 	User   struct {
 		Role string
 	}
@@ -56,9 +90,14 @@ func main() {
 						Condition: "Amount > 100",
 					},
 					{
-						ID:        "allow_admin",
+						ID:        "deny_untrusted_role",
+						Effect:    policy.EffectDeny,
+						Condition: "User.Role == '' || User.Role not in ['admin', 'owner']",
+					},
+					{
+						ID:        "allow_trusted_role_withdrawal",
 						Effect:    policy.EffectAllow,
-						Condition: "Amount <= 100 && User.Role in ['admin', 'owner']",
+						Condition: "User.Role in ['admin', 'owner'] && Direction == 'out'",
 					},
 				},
 			},
@@ -71,8 +110,9 @@ func main() {
 	}
 
 	ctx := TransactionContext{
-		Amount: 90,
-		User:   struct{ Role string }{Role: "admin"},
+		Amount:    90,
+		Direction: "out",
+		User:      struct{ Role string }{Role: "admin"},
 	}
 
 	decision := engine.Evaluate(context.Background(), ctx)
@@ -181,7 +221,7 @@ go run ./examples
 Example output:
 
 ```
-decision=ALLOW policy=withdrawal-override rule=allow_small_admin_owner message=Allow admins or owners to move less than or equal to 100 units
+decision=ALLOW policy=withdrawal-override rule=allow_trusted_role_withdrawal message=Allow admins or owners to initiate outbound withdrawals
 ```
 
 ## Designing Policies

@@ -15,7 +15,7 @@
       "asset_hold_id": "339b1be2-2792-47f2-bf4b-2f75a64037bc",
       "from_address": "0x517D1e31B764d154F3E796B3A421727f8d41C8e2",
       "to_address": "0xe6EBF81E9C225BbCEa9b5399E0D0d0f29f30f119",
-      "amount": "100",
+      "amount": "90",
       "tx_hash": null,
       "direction": "out",
       "block_number": 0,

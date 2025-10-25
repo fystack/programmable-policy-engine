@@ -13,10 +13,16 @@
           "condition": "transaction.amount_numeric > 99.9"
         },
         {
-          "id": "allow_small_admin_owner",
-          "description": "Allow admins or owners to move less than or equal to 100 units",
+          "id": "deny_untrusted_role",
+          "description": "Deny withdrawals when the requester is not a trusted role",
+          "effect": "DENY",
+          "condition": "transaction.user.role == nil || transaction.user.role == '' || transaction.user.role not in ['admin', 'owner']"
+        },
+        {
+          "id": "allow_trusted_role_withdrawal",
+          "description": "Allow admins or owners to initiate outbound withdrawals",
           "effect": "ALLOW",
-          "condition": "transaction.amount_numeric <= 100 && transaction.user.role in ['admin', 'owner']"
+          "condition": "transaction.user.role in ['admin', 'owner'] && transaction.direction == 'out'"
         }
       ]
     }
