@@ -9,7 +9,7 @@ This repository provides a programmable policy engine that helps wallets and tre
   "policies": [
     {
       "name": "withdrawal-override",
-      "description": "Control withdrawals based on transaction attributes and user role",
+      "description": "Control withdrawals based on transaction attributes and asset type",
       "rules": [
         {
           "id": "deny_exceed_amount",
@@ -18,16 +18,10 @@ This repository provides a programmable policy engine that helps wallets and tre
           "condition": "transaction.amount_numeric > 99.9"
         },
         {
-          "id": "deny_untrusted_role",
-          "description": "Deny withdrawals when the requester is not a trusted role",
-          "effect": "DENY",
-          "condition": "transaction.user.role == nil || transaction.user.role == '' || transaction.user.role not in ['admin', 'owner']"
-        },
-        {
-          "id": "allow_trusted_role_withdrawal",
-          "description": "Allow admins or owners to initiate outbound withdrawals",
+          "id": "allow_stablecoin_transfer",
+          "description": "Allow outbound transfers for supported stablecoins",
           "effect": "ALLOW",
-          "condition": "transaction.user.role in ['admin', 'owner'] && transaction.direction == 'out'"
+          "condition": "transaction.asset.symbol in ['USDC', 'USDT']"
         }
       ]
     }
@@ -68,10 +62,10 @@ import (
 )
 
 type TransactionContext struct {
-	Amount float64
+	Amount    float64
 	Direction string
-	User   struct {
-		Role string
+	Asset     struct {
+		Symbol string
 	}
 }
 
@@ -90,14 +84,9 @@ func main() {
 						Condition: "Amount > 100",
 					},
 					{
-						ID:        "deny_untrusted_role",
-						Effect:    policy.EffectDeny,
-						Condition: "User.Role == '' || User.Role not in ['admin', 'owner']",
-					},
-					{
-						ID:        "allow_trusted_role_withdrawal",
+						ID:        "allow_stablecoin_transfer",
 						Effect:    policy.EffectAllow,
-						Condition: "User.Role in ['admin', 'owner'] && Direction == 'out'",
+						Condition: "Asset.Symbol in ['USDC', 'USDT'] && Direction == 'out'",
 					},
 				},
 			},
@@ -112,7 +101,7 @@ func main() {
 	ctx := TransactionContext{
 		Amount:    90,
 		Direction: "out",
-		User:      struct{ Role string }{Role: "admin"},
+		Asset:     struct{ Symbol string }{Symbol: "USDC"},
 	}
 
 	decision := engine.Evaluate(context.Background(), ctx)
@@ -208,7 +197,7 @@ With this document:
 
 The repository includes a full wallet transaction walkthrough under `examples/`:
 
-1. **Policy document** (`examples/policies/transaction.json`) denies withdrawals above 100 units unless the user is trusted.
+1. **Policy document** (`examples/policies/transaction.json`) denies withdrawals above 100 units and only allows supported stablecoin assets.
 2. **Sample payload** (`examples/data/transaction.json`) mirrors a realistic transaction envelope from a wallet API.
 3. **Runner** (`examples/main.go`) loads both the policy and payload, applies type validation with `WithSchemaDefinition`, and prints the decision.
 
@@ -221,7 +210,7 @@ go run ./examples
 Example output:
 
 ```
-decision=ALLOW policy=withdrawal-override rule=allow_trusted_role_withdrawal message=Allow admins or owners to initiate outbound withdrawals
+decision=ALLOW policy=withdrawal-override rule=allow_stablecoin_transfer message=Allow outbound transfers for supported stablecoins
 ```
 
 ## Designing Policies

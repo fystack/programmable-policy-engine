@@ -4,7 +4,7 @@
   "policies": [
     {
       "name": "withdrawal-override",
-      "description": "Control withdrawals based on transaction attributes and user role",
+      "description": "Control withdrawals based on transaction attributes and asset type",
       "rules": [
         {
           "id": "deny_exceed_amount",
@@ -13,16 +13,10 @@
           "condition": "transaction.amount_numeric > 99.9"
         },
         {
-          "id": "deny_untrusted_role",
-          "description": "Deny withdrawals when the requester is not a trusted role",
-          "effect": "DENY",
-          "condition": "transaction.user.role == nil || transaction.user.role == '' || transaction.user.role not in ['admin', 'owner']"
-        },
-        {
-          "id": "allow_trusted_role_withdrawal",
-          "description": "Allow admins or owners to initiate outbound withdrawals",
+          "id": "allow_stablecoin_transfer",
+          "description": "Allow outbound transfers for supported stablecoins",
           "effect": "ALLOW",
-          "condition": "transaction.user.role in ['admin', 'owner'] && transaction.direction == 'out'"
+          "condition": "transaction.asset.symbol in ['USDC', 'USDT']"
         }
       ]
     }
