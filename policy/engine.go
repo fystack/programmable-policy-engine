@@ -69,8 +69,8 @@ func CompileDocument(doc Document, opts ...EngineOption) (*Engine, error) {
 		engine.defaultEffect = *doc.DefaultEffect
 	}
 
-	if !engine.defaultEffect.IsValid() {
-		return nil, fmt.Errorf("invalid default effect %q", engine.defaultEffect)
+	if engine.defaultEffect == "" {
+		return nil, fmt.Errorf("default effect cannot be empty")
 	}
 
 	compiled := make([]*compiledPolicy, 0, len(doc.Policies))
@@ -107,8 +107,8 @@ func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 		return decision
 	}
 
-	var allowDecision Decision
-	var hasAllowDecision bool
+	var matchedDecision Decision
+	var hasMatchedDecision bool
 	evaluated := 0
 
 	policyErrors := make([][]error, len(e.policies))
@@ -140,15 +140,15 @@ func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 			}
 			matchDecision.ErrorMessage = cleanErrorMessage(matchDecision.Error)
 
-			if rule.rule.Effect == EffectDeny {
+			if rule.rule.Effect.IsDeny() {
 				return matchDecision
 			}
 
 			policyMatched = true
 
-			if !hasAllowDecision {
-				allowDecision = matchDecision
-				hasAllowDecision = true
+			if !hasMatchedDecision {
+				matchedDecision = matchDecision
+				hasMatchedDecision = true
 			}
 		}
 
@@ -163,19 +163,19 @@ func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 			}
 			defaultDecision.ErrorMessage = cleanErrorMessage(defaultDecision.Error)
 
-			if policy.defaultEffect == EffectDeny {
+			if policy.defaultEffect.IsDeny() {
 				return defaultDecision
 			}
 
-			if !hasAllowDecision {
-				allowDecision = defaultDecision
-				hasAllowDecision = true
+			if !hasMatchedDecision {
+				matchedDecision = defaultDecision
+				hasMatchedDecision = true
 			}
 		}
 	}
 
-	if hasAllowDecision {
-		return allowDecision
+	if hasMatchedDecision {
+		return matchedDecision
 	}
 
 	decision.Evaluated = evaluated
@@ -209,8 +209,8 @@ func compilePolicy(p Policy, cfg engineConfig) (*compiledPolicy, error) {
 		hasLocalDefault = true
 	}
 
-	if hasLocalDefault && !policyDefault.IsValid() {
-		return nil, fmt.Errorf("policy %q has invalid default effect %q", p.Name, policyDefault)
+	if hasLocalDefault && policyDefault == "" {
+		return nil, fmt.Errorf("policy %q has empty default effect", p.Name)
 	}
 
 	if len(p.Rules) == 0 && !hasLocalDefault {
@@ -243,8 +243,8 @@ func compilePolicy(p Policy, cfg engineConfig) (*compiledPolicy, error) {
 
 		p.Rules[idx] = rule
 
-		if !rule.Effect.IsValid() {
-			return nil, fmt.Errorf("rule %q has invalid effect %q", rule.ID, rule.Effect)
+		if rule.Effect == "" {
+			return nil, fmt.Errorf("rule %q has empty effect", rule.ID)
 		}
 
 		if rule.Condition == "" {

@@ -10,12 +10,8 @@ const (
 	EffectDeny Effect = "DENY"
 )
 
-// IsValid returns true when the effect is one of the supported values.
-func (e Effect) IsValid() bool {
-	switch e {
-	case EffectAllow, EffectDeny:
-		return true
-	default:
-		return false
-	}
+// IsDeny returns true for the built-in deny effect.
+// Deny effects short-circuit evaluation (first deny wins).
+func (e Effect) IsDeny() bool {
+	return e == EffectDeny
 }

@@ -1142,6 +1142,411 @@ func TestDecimalComparisonAllowsHighPrecision(t *testing.T) {
 	}
 }
 
+func TestCustomEffectRuleMatchReturnsCustomEffect(t *testing.T) {
+	const EffectAutoApprove policy.Effect = "AUTO_APPROVE"
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "withdrawal-approval",
+				Rules: []policy.Rule{
+					{
+						ID:        "auto_approve_small_whitelisted",
+						Effect:    EffectAutoApprove,
+						Condition: `transaction.is_whitelisted == true && transaction.amount_numeric < 5000`,
+					},
+					{
+						ID:        "allow_whitelisted",
+						Effect:    policy.EffectAllow,
+						Condition: `transaction.is_whitelisted == true`,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc, policy.WithSchemaDefinition(map[string]any{
+		"transaction": map[string]any{},
+	}))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{
+		"transaction": map[string]any{
+			"is_whitelisted": true,
+			"amount_numeric": 1000.0,
+		},
+	})
+
+	if decision.Effect != EffectAutoApprove {
+		t.Fatalf("expected AUTO_APPROVE, got %s", decision.Effect)
+	}
+	if decision.Rule != "auto_approve_small_whitelisted" {
+		t.Fatalf("expected rule 'auto_approve_small_whitelisted', got %s", decision.Rule)
+	}
+	if !decision.Matched {
+		t.Fatalf("expected matched=true")
+	}
+}
+
+func TestCustomEffectDenyStillShortCircuits(t *testing.T) {
+	const EffectFlagReview policy.Effect = "FLAG_FOR_REVIEW"
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "review-policy",
+				Rules: []policy.Rule{
+					{
+						ID:        "deny_blocked_user",
+						Effect:    policy.EffectDeny,
+						Condition: `transaction.user_status == 'blocked'`,
+					},
+					{
+						ID:        "flag_large_amount",
+						Effect:    EffectFlagReview,
+						Condition: `transaction.amount_numeric > 10000`,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc, policy.WithSchemaDefinition(map[string]any{
+		"transaction": map[string]any{},
+	}))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Both conditions match, but DENY should short-circuit
+	decision := engine.Evaluate(context.Background(), map[string]any{
+		"transaction": map[string]any{
+			"user_status":    "blocked",
+			"amount_numeric": 50000.0,
+		},
+	})
+
+	if decision.Effect != policy.EffectDeny {
+		t.Fatalf("expected DENY to short-circuit, got %s", decision.Effect)
+	}
+	if decision.Rule != "deny_blocked_user" {
+		t.Fatalf("expected rule 'deny_blocked_user', got %s", decision.Rule)
+	}
+}
+
+func TestCustomEffectAsDocumentDefault(t *testing.T) {
+	const EffectRateLimit policy.Effect = "RATE_LIMIT"
+
+	doc := policy.Document{
+		DefaultEffect: ptr(EffectRateLimit),
+		Policies: []policy.Policy{
+			{
+				Name: "rate-limit-policy",
+				Rules: []policy.Rule{
+					{
+						ID:        "allow_premium",
+						Effect:    policy.EffectAllow,
+						Condition: `user.tier == 'premium'`,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc, policy.WithSchemaDefinition(map[string]any{
+		"user": map[string]any{},
+	}))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// No rule matches → should return custom default
+	decision := engine.Evaluate(context.Background(), map[string]any{
+		"user": map[string]any{"tier": "free"},
+	})
+
+	if decision.Effect != EffectRateLimit {
+		t.Fatalf("expected RATE_LIMIT default, got %s", decision.Effect)
+	}
+	if decision.Matched {
+		t.Fatalf("expected matched=false for default fallback")
+	}
+}
+
+func TestCustomEffectAsPolicyDefault(t *testing.T) {
+	const EffectManualReview policy.Effect = "MANUAL_REVIEW"
+	policyDefault := EffectManualReview
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name:          "review-fallback",
+				DefaultEffect: &policyDefault,
+				Rules: []policy.Rule{
+					{
+						ID:        "allow_small",
+						Effect:    policy.EffectAllow,
+						Condition: `transaction.amount_numeric < 100`,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc, policy.WithSchemaDefinition(map[string]any{
+		"transaction": map[string]any{},
+	}))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// No rule matches → policy default kicks in
+	decision := engine.Evaluate(context.Background(), map[string]any{
+		"transaction": map[string]any{"amount_numeric": 500.0},
+	})
+
+	if decision.Effect != EffectManualReview {
+		t.Fatalf("expected MANUAL_REVIEW from policy default, got %s", decision.Effect)
+	}
+	if !decision.Matched {
+		t.Fatalf("expected matched=true when policy default is applied")
+	}
+	if decision.Policy != "review-fallback" {
+		t.Fatalf("expected policy 'review-fallback', got %s", decision.Policy)
+	}
+}
+
+func TestCustomEffectMultiplePoliciesFirstMatchWins(t *testing.T) {
+	const (
+		EffectAutoApprove policy.Effect = "AUTO_APPROVE"
+		EffectEscalate    policy.Effect = "ESCALATE"
+	)
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "policy-a",
+				Rules: []policy.Rule{
+					{
+						ID:        "auto_approve",
+						Effect:    EffectAutoApprove,
+						Condition: `transaction.amount_numeric < 100`,
+					},
+				},
+			},
+			{
+				Name: "policy-b",
+				Rules: []policy.Rule{
+					{
+						ID:        "escalate",
+						Effect:    EffectEscalate,
+						Condition: `transaction.amount_numeric < 500`,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc, policy.WithSchemaDefinition(map[string]any{
+		"transaction": map[string]any{},
+	}))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// Both policies match, first non-deny wins
+	decision := engine.Evaluate(context.Background(), map[string]any{
+		"transaction": map[string]any{"amount_numeric": 50.0},
+	})
+
+	if decision.Effect != EffectAutoApprove {
+		t.Fatalf("expected AUTO_APPROVE (first match), got %s", decision.Effect)
+	}
+	if decision.Rule != "auto_approve" {
+		t.Fatalf("expected rule 'auto_approve', got %s", decision.Rule)
+	}
+}
+
+func TestCustomEffectWithOptionDefault(t *testing.T) {
+	const EffectQuarantine policy.Effect = "QUARANTINE"
+
+	doc := policy.Document{
+		Policies: []policy.Policy{
+			{
+				Name: "test-policy",
+				Rules: []policy.Rule{
+					{
+						ID:        "allow_known",
+						Effect:    policy.EffectAllow,
+						Condition: `user.known == true`,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithDefaultEffect(EffectQuarantine),
+		policy.WithSchemaDefinition(map[string]any{
+			"user": map[string]any{},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// No match → WithDefaultEffect custom value used
+	decision := engine.Evaluate(context.Background(), map[string]any{
+		"user": map[string]any{"known": false},
+	})
+
+	if decision.Effect != EffectQuarantine {
+		t.Fatalf("expected QUARANTINE from WithDefaultEffect, got %s", decision.Effect)
+	}
+}
+
+func TestEmptyEffectRejectedAtCompileTime(t *testing.T) {
+	// Rule with empty effect
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "bad-policy",
+				Rules: []policy.Rule{
+					{
+						ID:        "bad_rule",
+						Effect:    "",
+						Condition: `true`,
+					},
+				},
+			},
+		},
+	}
+
+	_, err := policy.CompileDocument(doc)
+	if err == nil {
+		t.Fatal("expected error for empty effect, got nil")
+	}
+}
+
+func TestEmptyDefaultEffectRejected(t *testing.T) {
+	emptyEffect := policy.Effect("")
+	doc := policy.Document{
+		DefaultEffect: &emptyEffect,
+		Policies: []policy.Policy{
+			{
+				Name: "test",
+				Rules: []policy.Rule{
+					{
+						ID:        "r1",
+						Effect:    policy.EffectAllow,
+						Condition: `true`,
+					},
+				},
+			},
+		},
+	}
+
+	_, err := policy.CompileDocument(doc)
+	if err == nil {
+		t.Fatal("expected error for empty default effect, got nil")
+	}
+}
+
+func TestEmptyPolicyDefaultEffectRejected(t *testing.T) {
+	emptyEffect := policy.Effect("")
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name:          "bad-default",
+				DefaultEffect: &emptyEffect,
+			},
+		},
+	}
+
+	_, err := policy.CompileDocument(doc)
+	if err == nil {
+		t.Fatal("expected error for empty policy default effect, got nil")
+	}
+}
+
+func TestCustomEffectMixedWithBuiltins(t *testing.T) {
+	const EffectFlag policy.Effect = "FLAG"
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectAllow),
+		Policies: []policy.Policy{
+			{
+				Name: "mixed-effects",
+				Rules: []policy.Rule{
+					{
+						ID:        "deny_sanctioned",
+						Effect:    policy.EffectDeny,
+						Condition: `transaction.sanctioned == true`,
+					},
+					{
+						ID:        "flag_high_risk",
+						Effect:    EffectFlag,
+						Condition: `transaction.risk_score > 80`,
+					},
+					{
+						ID:        "allow_normal",
+						Effect:    policy.EffectAllow,
+						Condition: `transaction.risk_score <= 80`,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc, policy.WithSchemaDefinition(map[string]any{
+		"transaction": map[string]any{},
+	}))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// High risk, not sanctioned → FLAG
+	decision := engine.Evaluate(context.Background(), map[string]any{
+		"transaction": map[string]any{
+			"sanctioned": false,
+			"risk_score": 90.0,
+		},
+	})
+	if decision.Effect != EffectFlag {
+		t.Fatalf("expected FLAG, got %s", decision.Effect)
+	}
+
+	// Sanctioned → DENY (short-circuit)
+	decision = engine.Evaluate(context.Background(), map[string]any{
+		"transaction": map[string]any{
+			"sanctioned": true,
+			"risk_score": 90.0,
+		},
+	})
+	if decision.Effect != policy.EffectDeny {
+		t.Fatalf("expected DENY for sanctioned, got %s", decision.Effect)
+	}
+
+	// Low risk, not sanctioned → ALLOW
+	decision = engine.Evaluate(context.Background(), map[string]any{
+		"transaction": map[string]any{
+			"sanctioned": false,
+			"risk_score": 50.0,
+		},
+	})
+	if decision.Effect != policy.EffectAllow {
+		t.Fatalf("expected ALLOW for low risk, got %s", decision.Effect)
+	}
+}
+
 func ptr[T any](value T) *T {
 	return &value
 }
