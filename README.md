@@ -134,6 +134,87 @@ default:
 
 `Matched` is true when a specific rule (or a policy-level default) triggered. If all policies fall back to the document default, `Matched` remains false but `Effect` still reflects the decision (`ALLOW` or `DENY`).
 
+### User-defined actions (custom effects)
+
+The engine ships with two built-in effects (`ALLOW` and `DENY`) but accepts any non-empty string as an effect. `DENY` always short-circuits evaluation; every other effect is treated equally—first match wins. This lets you model domain-specific outcomes without forking or wrapping the engine:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/fystack/programmable-policy-engine/policy"
+)
+
+// Define your own effects alongside the built-in ones.
+const (
+	EffectAutoApprove policy.Effect = "AUTO_APPROVE"
+	EffectFlagReview  policy.Effect = "FLAG_FOR_REVIEW"
+)
+
+func main() {
+	defaultEffect := policy.EffectDeny
+
+	doc := policy.Document{
+		DefaultEffect: &defaultEffect,
+		Policies: []policy.Policy{
+			{
+				Name: "withdrawal-approval",
+				Rules: []policy.Rule{
+					{
+						ID:        "block_large",
+						Effect:    policy.EffectDeny,
+						Condition: "ValueUSD > 50000",
+					},
+					{
+						ID:        "auto_approve_small_whitelisted",
+						Effect:    EffectAutoApprove,
+						Condition: "IsWhitelisted && ValueUSD < 5000",
+					},
+					{
+						ID:        "flag_medium",
+						Effect:    EffectFlagReview,
+						Condition: "ValueUSD >= 5000 && ValueUSD <= 50000",
+					},
+					{
+						ID:        "allow_whitelisted",
+						Effect:    policy.EffectAllow,
+						Condition: "IsWhitelisted",
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc)
+	if err != nil {
+		panic(err)
+	}
+
+	input := map[string]any{
+		"ValueUSD":      3500.0,
+		"IsWhitelisted": true,
+	}
+
+	decision := engine.Evaluate(context.Background(), input)
+
+	switch decision.Effect {
+	case policy.EffectDeny:
+		fmt.Println("blocked:", decision.Message)
+	case EffectAutoApprove:
+		fmt.Println("auto-approved — no manual review needed")
+	case EffectFlagReview:
+		fmt.Println("flagged for manual review")
+	case policy.EffectAllow:
+		fmt.Println("allowed — requires standard approval")
+	}
+}
+```
+
+Because the caller defines what each effect means, you can extend the decision space (e.g., `RATE_LIMIT`, `QUARANTINE`, `NOTIFY_COMPLIANCE`) without changing the engine.
+
 ### Mapping snake_case JSON to expr fields
 
 Use the `expr` struct tag to expose snake_case JSON fields with the same name inside expressions:
