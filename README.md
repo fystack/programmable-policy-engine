@@ -37,6 +37,7 @@ Key use cases include:
 ## Features
 - **Deterministic evaluations** powered by compiled expr programs
 - **Default effects** at document and policy level with a DENY-overrides-ALLOW model
+- **Effect precedence** (optional) for deny-overrides evaluation — highest-priority effect wins regardless of rule order
 - **Strict schema validation** (optional) via `WithSchemaDefinition`
 - **Friendly error reporting** that surfaces the failing rule and expression issue
 - **Zero-config loader** for JSON policy documents
@@ -214,6 +215,46 @@ func main() {
 ```
 
 Because the caller defines what each effect means, you can extend the decision space (e.g., `RATE_LIMIT`, `QUARANTINE`, `NOTIFY_COMPLIANCE`) without changing the engine.
+
+### Effect precedence (deny-overrides)
+
+By default the engine uses first-match-wins for non-deny effects. This works well when rule ordering is deliberate, but in custody and treasury contexts a priority mistake can accidentally let an `ALLOW` slip in before a `DENY` or `REVIEW`.
+
+`WithEffectPrecedence` switches to a **highest-priority-wins** strategy. You declare the hierarchy once at compile time and the engine enforces it regardless of rule or policy ordering:
+
+```go
+const EffectReview policy.Effect = "REVIEW"
+
+engine, err := policy.CompileDocument(doc,
+    policy.WithEffectPrecedence(policy.EffectDeny, EffectReview, policy.EffectAllow),
+)
+```
+
+With this configuration:
+
+| Matched effects | Result | Why |
+| --- | --- | --- |
+| `DENY` + `ALLOW` | `DENY` | DENY has higher precedence |
+| `REVIEW` + `ALLOW` | `REVIEW` | REVIEW has higher precedence than ALLOW |
+| `ALLOW` only | `ALLOW` | Single match, returned as-is |
+| Nothing matched | `DENY` | Document default kicks in |
+
+The engine still short-circuits when the highest-priority effect (first in the list) is matched — there is no point evaluating further once a `DENY` is found. All other matches are collected and the winner is selected at the end, so `Evaluated` on the decision always reflects the full rule count.
+
+Effects not listed in the precedence order are treated as lowest priority. They can still win when they are the only match, but any effect that *is* in the list will beat them.
+
+```go
+decision := engine.Evaluate(context.Background(), input)
+
+switch decision.Effect {
+case policy.EffectDeny:
+    fmt.Println("blocked:", decision.Message)
+case EffectReview:
+    fmt.Println("flagged for manual review")
+case policy.EffectAllow:
+    fmt.Println("approved")
+}
+```
 
 ### Mapping snake_case JSON to expr fields
 

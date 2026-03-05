@@ -1547,6 +1547,296 @@ func TestCustomEffectMixedWithBuiltins(t *testing.T) {
 	}
 }
 
+// --- Effect Precedence Tests ---
+
+func TestEffectPrecedenceDenyBeatsAllow(t *testing.T) {
+	// Without precedence, first-match-wins would return ALLOW (it appears first).
+	// With precedence, DENY should win.
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					{ID: "allow_all", Effect: policy.EffectAllow, Condition: "true"},
+				},
+			},
+			{
+				Name: "p2",
+				Rules: []policy.Rule{
+					{ID: "deny_all", Effect: policy.EffectDeny, Condition: "true"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithEffectPrecedence(policy.EffectDeny, policy.EffectAllow),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	if decision.Effect != policy.EffectDeny {
+		t.Fatalf("expected DENY (higher precedence), got %s", decision.Effect)
+	}
+	if decision.Rule != "deny_all" {
+		t.Fatalf("expected deny_all rule, got %s", decision.Rule)
+	}
+}
+
+func TestEffectPrecedenceReviewBeatsAllow(t *testing.T) {
+	const EffectReview policy.Effect = "REVIEW"
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					{ID: "allow_it", Effect: policy.EffectAllow, Condition: "true"},
+					{ID: "review_it", Effect: EffectReview, Condition: "true"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithEffectPrecedence(policy.EffectDeny, EffectReview, policy.EffectAllow),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	if decision.Effect != EffectReview {
+		t.Fatalf("expected REVIEW (higher precedence than ALLOW), got %s", decision.Effect)
+	}
+}
+
+func TestEffectPrecedenceShortCircuitsOnHighest(t *testing.T) {
+	// DENY is priority 0 — should short-circuit, so rules after it are still counted
+	// in evaluated but DENY wins immediately.
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectAllow),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					{ID: "deny_first", Effect: policy.EffectDeny, Condition: "true"},
+					{ID: "allow_second", Effect: policy.EffectAllow, Condition: "true"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithEffectPrecedence(policy.EffectDeny, policy.EffectAllow),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	if decision.Effect != policy.EffectDeny {
+		t.Fatalf("expected DENY, got %s", decision.Effect)
+	}
+	// Should have evaluated only 1 rule before short-circuiting
+	if decision.Evaluated != 1 {
+		t.Fatalf("expected 1 evaluated rule (short-circuit), got %d", decision.Evaluated)
+	}
+}
+
+func TestEffectPrecedenceUnknownEffectLosesToKnown(t *testing.T) {
+	const EffectCustom policy.Effect = "CUSTOM"
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					// CUSTOM matches first but isn't in precedence list
+					{ID: "custom_rule", Effect: EffectCustom, Condition: "true"},
+					{ID: "allow_rule", Effect: policy.EffectAllow, Condition: "true"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithEffectPrecedence(policy.EffectDeny, policy.EffectAllow),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	// ALLOW is in the precedence list, CUSTOM is not — ALLOW should win
+	if decision.Effect != policy.EffectAllow {
+		t.Fatalf("expected ALLOW (known precedence) over CUSTOM (unknown), got %s", decision.Effect)
+	}
+}
+
+func TestEffectPrecedenceUnknownEffectWinsWhenOnlyMatch(t *testing.T) {
+	const EffectCustom policy.Effect = "CUSTOM"
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					{ID: "custom_only", Effect: EffectCustom, Condition: "true"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithEffectPrecedence(policy.EffectDeny, policy.EffectAllow),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	// CUSTOM is the only match — should still be returned
+	if decision.Effect != EffectCustom {
+		t.Fatalf("expected CUSTOM as only match, got %s", decision.Effect)
+	}
+}
+
+func TestEffectPrecedenceNoMatchReturnsDefault(t *testing.T) {
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					{ID: "never_match", Effect: policy.EffectAllow, Condition: "false"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithEffectPrecedence(policy.EffectDeny, policy.EffectAllow),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	if decision.Effect != policy.EffectDeny {
+		t.Fatalf("expected DENY default when nothing matches, got %s", decision.Effect)
+	}
+	if decision.Matched {
+		t.Fatal("expected Matched=false when no rule matched")
+	}
+}
+
+func TestEffectPrecedenceWithPolicyDefault(t *testing.T) {
+	const EffectReview policy.Effect = "REVIEW"
+	reviewEffect := EffectReview
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					{ID: "allow_it", Effect: policy.EffectAllow, Condition: "true"},
+				},
+			},
+			{
+				Name:          "p2",
+				DefaultEffect: &reviewEffect,
+				Rules: []policy.Rule{
+					// No rules match — policy default REVIEW kicks in
+					{ID: "no_match", Effect: policy.EffectAllow, Condition: "false"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithEffectPrecedence(policy.EffectDeny, EffectReview, policy.EffectAllow),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	// REVIEW from p2 default should beat ALLOW from p1 rule
+	if decision.Effect != EffectReview {
+		t.Fatalf("expected REVIEW (policy default, higher precedence), got %s", decision.Effect)
+	}
+}
+
+func TestEffectPrecedenceEvaluatedCountReflectsFullRun(t *testing.T) {
+	const EffectReview policy.Effect = "REVIEW"
+
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					{ID: "r1", Effect: EffectReview, Condition: "true"},
+					{ID: "r2", Effect: policy.EffectAllow, Condition: "true"},
+					{ID: "r3", Effect: policy.EffectAllow, Condition: "false"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc,
+		policy.WithEffectPrecedence(policy.EffectDeny, EffectReview, policy.EffectAllow),
+	)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	if decision.Effect != EffectReview {
+		t.Fatalf("expected REVIEW, got %s", decision.Effect)
+	}
+	// All 3 rules should be evaluated (no short-circuit since DENY wasn't matched)
+	if decision.Evaluated != 3 {
+		t.Fatalf("expected 3 evaluated rules, got %d", decision.Evaluated)
+	}
+}
+
+func TestEffectPrecedenceWithoutOptionUsesFirstMatch(t *testing.T) {
+	const EffectReview policy.Effect = "REVIEW"
+
+	// Verify that without WithEffectPrecedence, first-match-wins is preserved
+	doc := policy.Document{
+		DefaultEffect: ptr(policy.EffectDeny),
+		Policies: []policy.Policy{
+			{
+				Name: "p1",
+				Rules: []policy.Rule{
+					{ID: "allow_first", Effect: policy.EffectAllow, Condition: "true"},
+					{ID: "review_second", Effect: EffectReview, Condition: "true"},
+				},
+			},
+		},
+	}
+
+	engine, err := policy.CompileDocument(doc)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), map[string]any{})
+	if decision.Effect != policy.EffectAllow {
+		t.Fatalf("expected ALLOW (first-match-wins without precedence), got %s", decision.Effect)
+	}
+}
+
 func ptr[T any](value T) *T {
 	return &value
 }

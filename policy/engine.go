@@ -12,18 +12,20 @@ import (
 
 // Engine evaluates compiled policies against an input context.
 type Engine struct {
-	defaultEffect Effect
-	policies      []*compiledPolicy
+	defaultEffect    Effect
+	policies         []*compiledPolicy
+	effectPrecedence map[Effect]int // lower index = higher priority
 }
 
 // EngineOption configures compilation behaviour.
 type EngineOption func(*engineConfig)
 
 type engineConfig struct {
-	exprOptions   []expr.Option
-	defaultEffect Effect
-	env           any
-	strictTypes   bool
+	exprOptions      []expr.Option
+	defaultEffect    Effect
+	env              any
+	strictTypes      bool
+	effectPrecedence []Effect
 }
 
 // WithExprOptions passes expr compilation options for every rule.
@@ -51,6 +53,19 @@ func WithDefaultEffect(effect Effect) EngineOption {
 	}
 }
 
+// WithEffectPrecedence defines the priority order of effects for conflict resolution.
+// Effects listed first have higher priority. When multiple rules match, the effect
+// with the highest priority wins regardless of rule or policy ordering.
+// Any matched effect not in the list is treated as lowest priority (first-match-wins among them).
+//
+// Example for custody: WithEffectPrecedence(EffectDeny, EffectReview, EffectAllow)
+// This means DENY beats REVIEW beats ALLOW, regardless of rule order.
+func WithEffectPrecedence(effects ...Effect) EngineOption {
+	return func(cfg *engineConfig) {
+		cfg.effectPrecedence = effects
+	}
+}
+
 // CompileDocument converts a policy document into an executable engine.
 func CompileDocument(doc Document, opts ...EngineOption) (*Engine, error) {
 	cfg := engineConfig{
@@ -63,6 +78,13 @@ func CompileDocument(doc Document, opts ...EngineOption) (*Engine, error) {
 
 	engine := &Engine{
 		defaultEffect: cfg.defaultEffect,
+	}
+
+	if len(cfg.effectPrecedence) > 0 {
+		engine.effectPrecedence = make(map[Effect]int, len(cfg.effectPrecedence))
+		for i, e := range cfg.effectPrecedence {
+			engine.effectPrecedence[e] = i
+		}
 	}
 
 	if doc.DefaultEffect != nil {
@@ -96,6 +118,10 @@ func CompilePolicies(policies []Policy, opts ...EngineOption) (*Engine, error) {
 
 // Evaluate runs all compiled policies against the provided context value.
 // The final decision honours DENY over ALLOW, with a configurable default fallback.
+//
+// When WithEffectPrecedence is configured, all matching rules are evaluated and
+// the decision with the highest-priority effect wins. Otherwise, DENY short-circuits
+// and the first non-deny match wins.
 func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 	decision := Decision{
 		Effect:  e.defaultEffect,
@@ -107,6 +133,15 @@ func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 		return decision
 	}
 
+	if e.effectPrecedence != nil {
+		return e.evaluateWithPrecedence(input, decision)
+	}
+	return e.evaluateFirstMatch(input, decision)
+}
+
+// evaluateFirstMatch is the default evaluation strategy: DENY short-circuits,
+// first non-deny match wins.
+func (e *Engine) evaluateFirstMatch(input any, decision Decision) Decision {
 	var matchedDecision Decision
 	var hasMatchedDecision bool
 	evaluated := 0
@@ -182,6 +217,122 @@ func (e *Engine) Evaluate(_ context.Context, input any) Decision {
 	decision.Error = joinErrors(flattenErrors(policyErrors))
 	decision.ErrorMessage = cleanErrorMessage(decision.Error)
 	return decision
+}
+
+// matchSource records where a winning match came from so we can build
+// the Decision once after all rules have been evaluated.
+type matchSource struct {
+	effect     Effect
+	policyName string
+	ruleID     string
+	message    string
+	isDefault  bool // true when the match came from a policy default
+}
+
+// evaluateWithPrecedence evaluates all rules and returns the decision with the
+// highest-priority effect according to the configured precedence order.
+// The Decision is built once at the end so that Evaluated and Error reflect
+// the full evaluation run.
+func (e *Engine) evaluateWithPrecedence(input any, decision Decision) Decision {
+	var best *matchSource
+	bestPriority := -1 // -1 = no known priority
+	evaluated := 0
+
+	policyErrors := make([][]error, len(e.policies))
+
+	for idx, pol := range e.policies {
+		policyMatched := false
+
+		for _, rule := range pol.rules {
+			evaluated++
+
+			ok, err := rule.evaluate(input)
+			if err != nil {
+				policyErrors[idx] = append(policyErrors[idx], err)
+				continue
+			}
+
+			if !ok {
+				continue
+			}
+
+			policyMatched = true
+
+			priority, known := e.effectPrecedence[rule.rule.Effect]
+			if best == nil {
+				best = &matchSource{
+					effect:     rule.rule.Effect,
+					policyName: pol.policy.Name,
+					ruleID:     rule.rule.ID,
+					message:    rule.rule.Description,
+				}
+				if known {
+					bestPriority = priority
+				}
+			} else if known && (bestPriority == -1 || priority < bestPriority) {
+				best.effect = rule.rule.Effect
+				best.policyName = pol.policy.Name
+				best.ruleID = rule.rule.ID
+				best.message = rule.rule.Description
+				best.isDefault = false
+				bestPriority = priority
+			}
+
+			// Short-circuit: matched the highest-priority effect
+			if known && priority == 0 {
+				return e.buildDecision(best, evaluated, policyErrors)
+			}
+		}
+
+		if !policyMatched && pol.hasLocalDefault {
+			priority, known := e.effectPrecedence[pol.defaultEffect]
+			if best == nil {
+				best = &matchSource{
+					effect:     pol.defaultEffect,
+					policyName: pol.policy.Name,
+					message:    "policy default effect applied",
+					isDefault:  true,
+				}
+				if known {
+					bestPriority = priority
+				}
+			} else if known && (bestPriority == -1 || priority < bestPriority) {
+				best.effect = pol.defaultEffect
+				best.policyName = pol.policy.Name
+				best.ruleID = ""
+				best.message = "policy default effect applied"
+				best.isDefault = true
+				bestPriority = priority
+			}
+
+			if known && priority == 0 {
+				return e.buildDecision(best, evaluated, policyErrors)
+			}
+		}
+	}
+
+	if best != nil {
+		return e.buildDecision(best, evaluated, policyErrors)
+	}
+
+	decision.Evaluated = evaluated
+	decision.Error = joinErrors(flattenErrors(policyErrors))
+	decision.ErrorMessage = cleanErrorMessage(decision.Error)
+	return decision
+}
+
+func (e *Engine) buildDecision(src *matchSource, evaluated int, policyErrors [][]error) Decision {
+	allErrors := joinErrors(flattenErrors(policyErrors))
+	return Decision{
+		Effect:       src.effect,
+		Policy:       src.policyName,
+		Rule:         src.ruleID,
+		Message:      src.message,
+		Matched:      true,
+		Evaluated:    evaluated,
+		Error:        allErrors,
+		ErrorMessage: cleanErrorMessage(allErrors),
+	}
 }
 
 type compiledPolicy struct {
