@@ -18,11 +18,19 @@ type MatchedRule struct {
 // still contains all successful matches so callers can act on partial results.
 // Does not mutate engine state — safe for concurrent calls.
 func (e *Engine) Matches(ctx context.Context, input any) ([]MatchedRule, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	var matched []MatchedRule
 	var errs []error
 
 	for _, pol := range e.policies {
 		for _, rule := range pol.rules {
+			if err := ctx.Err(); err != nil {
+				return matched, err
+			}
+
 			ok, err := rule.evaluate(input)
 			if err != nil {
 				errs = append(errs, err)

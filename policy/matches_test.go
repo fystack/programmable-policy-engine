@@ -2,7 +2,9 @@ package policy_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/fystack/programmable-policy-engine/policy"
 )
@@ -182,6 +184,87 @@ func TestMatches_PartialMatchOnEvalError(t *testing.T) {
 	}
 	if matches[0].RuleID != "always_match" || matches[1].RuleID != "second_match" {
 		t.Errorf("unexpected matches: %v", matches)
+	}
+}
+
+func TestMatches_CanceledContext(t *testing.T) {
+	doc := policy.Document{
+		Policies: []policy.Policy{{
+			Name: "p1",
+			Rules: []policy.Rule{{
+				ID:        "r1",
+				Effect:    policy.EffectDeny,
+				Condition: "true",
+			}},
+		}},
+	}
+	engine, err := policy.CompileDocument(doc)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	matches, err := engine.Matches(ctx, map[string]any{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(matches))
+	}
+}
+
+func TestMatches_ExpiredContext(t *testing.T) {
+	doc := policy.Document{
+		Policies: []policy.Policy{{
+			Name: "p1",
+			Rules: []policy.Rule{{
+				ID:        "r1",
+				Effect:    policy.EffectDeny,
+				Condition: "true",
+			}},
+		}},
+	}
+	engine, err := policy.CompileDocument(doc)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	matches, err := engine.Matches(ctx, map[string]any{})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(matches))
+	}
+}
+
+func TestMatches_NilContextUsesBackground(t *testing.T) {
+	doc := policy.Document{
+		Policies: []policy.Policy{{
+			Name: "p1",
+			Rules: []policy.Rule{{
+				ID:        "r1",
+				Effect:    policy.EffectDeny,
+				Condition: "true",
+			}},
+		}},
+	}
+	engine, err := policy.CompileDocument(doc)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	matches, err := engine.Matches(nil, map[string]any{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
 	}
 }
 
